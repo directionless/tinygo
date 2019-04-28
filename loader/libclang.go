@@ -70,8 +70,12 @@ func (info *fileInfo) parseFragment(fragment string, cflags []string, posFilenam
 	index := C.clang_createIndex(0, 0)
 	defer C.clang_disposeIndex(index)
 
+	// pretend to be a .c file
 	filenameC := C.CString(posFilename + "!cgo.c")
 	defer C.free(unsafe.Pointer(filenameC))
+
+	// fix up error locations
+	fragment = fmt.Sprintf("# %d %#v\n", posLine+1, posFilename) + fragment
 
 	fragmentC := C.CString(fragment)
 	defer C.free(unsafe.Pointer(fragmentC))
@@ -111,20 +115,12 @@ func (info *fileInfo) parseFragment(fragment string, cflags []string, posFilenam
 			spelling := getString(C.clang_getDiagnosticSpelling(diagnostic))
 			severity := diagnosticSeverity[C.clang_getDiagnosticSeverity(diagnostic)]
 			location := C.clang_getDiagnosticLocation(diagnostic)
-			var file C.CXFile
+			var libclangFilename C.CXString
 			var line C.unsigned
 			var column C.unsigned
-			var offset C.unsigned
-			C.clang_getExpansionLocation(location, &file, &line, &column, &offset)
-			filename := getString(C.clang_getFileName(file))
-			if filename == posFilename+"!cgo.c" {
-				// Adjust errors from the `import "C"` snippet.
-				// Note: doesn't adjust filenames inside the error message
-				// itself.
-				filename = posFilename
-				line += C.uint(posLine)
-				offset = 0 // hard to calculate
-			} else if filepath.IsAbs(filename) {
+			C.clang_getPresumedLocation(location, &libclangFilename, &line, &column)
+			filename := getString(libclangFilename)
+			if filepath.IsAbs(filename) {
 				// Relative paths for readability, like other Go parser errors.
 				relpath, err := filepath.Rel(info.Program.Dir, filename)
 				if err == nil {
@@ -134,7 +130,7 @@ func (info *fileInfo) parseFragment(fragment string, cflags []string, posFilenam
 			errs = append(errs, &scanner.Error{
 				Pos: token.Position{
 					Filename: filename,
-					Offset:   int(offset),
+					Offset:   0, // not provided by clang_getPresumedLocation
 					Line:     int(line),
 					Column:   int(column),
 				},
